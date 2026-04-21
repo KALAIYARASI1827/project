@@ -1,8 +1,13 @@
+import tomllib
 import requests
+from pathlib import Path
 from bs4 import BeautifulSoup
 import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
+
+with open(Path(__file__).parent / "config.toml", "rb") as f:
+    _cfg = tomllib.load(f)["scraper"]
 
 #DISABLE WARNINGS
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -20,14 +25,14 @@ class TLSAdapter(HTTPAdapter):
 
 # SCRAPER
 def scrape_events_live():
-    url = "https://psgtech.edu/course%20conducted.php"
+    url = _cfg["url"]
 
     try:
         session = requests.Session()
         session.mount("https://", TLSAdapter())
 
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = session.get(url, headers=headers, timeout=10, verify=False)
+        headers = {"User-Agent": _cfg["user_agent"]}
+        res = session.get(url, headers=headers, timeout=_cfg["timeout"], verify=False)
 
         soup = BeautifulSoup(res.text, "html.parser")
 
@@ -65,7 +70,7 @@ def scrape_events_live():
         # STEP 3: Remove duplicates
         results = list(dict.fromkeys(results))
 
-        return results[:5]
+        return results[:_cfg["max_events"]]
 
     except Exception as e:
         print(" Scraping error:", e)

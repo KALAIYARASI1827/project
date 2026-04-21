@@ -1,257 +1,309 @@
 import traceback
+import tomllib
 import psycopg2
-from fastapi import FastAPI
-from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
+import psycopg2.extras
+from pathlib import Path
 
+from ollama import Client as OllamaClient
 from rapidfuzz import fuzz
 
-from langchain_community.vectorstores import PGVector
 from langchain_ollama import OllamaEmbeddings, ChatOllama
-from langchain_core.prompts import PromptTemplate
 
 # CONFIG
+with open(Path(__file__).parent / "config.toml", "rb") as f:
+    _cfg = tomllib.load(f)
+
+_db = _cfg["database"]
 DB_CONFIG = {
-    "host": "49.204.233.77",
-    "port": "5432",
-    "database": "mfrp_kalai",
-    "user": "dbadmin",
-    "password": "Ur12ec125"
+    "host": _db["host"],
+    "port": str(_db["port"]),
+    "database": _db["name"],
+    "user": _db["user"],
+    "password": _db["password"],
 }
 
-COLLECTION_NAME = "documents"
-OLLAMA_URL = "http://49.204.233.77:11434"
+COLLECTION_NAME = _cfg["vectorstore"]["faculty_collection"]
+OLLAMA_URL      = _cfg["ollama"]["url"]
+_CHAT_MODEL     = _cfg["ollama"]["chat_model"]
 
-#INIT 
-embedding = OllamaEmbeddings(model="nomic-embed-text", base_url=OLLAMA_URL)
-llm = ChatOllama(model="mistral", base_url=OLLAMA_URL, temperature=0.1)
+_ollama = OllamaClient(host=OLLAMA_URL, timeout=10)
 
-vectordb = PGVector(
-    connection_string=f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}",
-    collection_name=COLLECTION_NAME,
-    embedding_function=embedding,
-    use_jsonb=True
-)
+def _llm_classify(prompt: str) -> str:
+    print(f"  [LLM classify] prompt: {prompt[:80]}...")
+    res = _ollama.chat(
+        model=_CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0}
+    )
+    result = res["message"]["content"].strip().lower()
+    print(f"  [LLM classify] response: '{result}'")
+    return result
 
-prompt = PromptTemplate.from_template("""
-You are a PSG College assistant.
-Answer ONLY from context.
-Do not hallucinate.
+_llm      = None
+_embedder = None
 
-Context:
-{context}
+def _get_llm():
+    global _llm
+    if _llm is None:
+        _llm = ChatOllama(model=_CHAT_MODEL, base_url=OLLAMA_URL, temperature=0.1)
+    return _llm
 
-Question:
-{question}
+def _get_embedder():
+    global _embedder
+    if _embedder is None:
+        _embedder = OllamaEmbeddings(model=_cfg["ollama"]["embed_model"], base_url=OLLAMA_URL)
+    return _embedder
 
-Answer:
-""")
-
-rag_chain = prompt | llm
+def _embed(text: str):
+    return _get_embedder().embed_query(text)
 
 # HELPERS
-def clean(text):
-    return str(text).lower().replace("&", "and").strip()
-
-def detect_department_id(query):
-    q = clean(query)
-    mapping = {
-        "cse": "cse", "computer science": "cse",
-        "ece": "ece", "electronics": "ece",
-        "eee": "eee", "electrical": "eee",
-        "mech": "mech", "mechanical": "mech",
-        "civil": "civil",
-        "it": "it",
-        "math": "amcs", "maths": "amcs"
-    }
-    for k, v in mapping.items():
-        if k in q:
-            return v
-    return None
-
-def detect_query_type(query):
-    q = clean(query)
-
-    if "hod" in q:
-        return "hod"
-    elif "list" in q or "all faculty" in q:
-        return "list"
-    elif "who is" in q or "tell me about" in q:
-        return "person"
-    else:
-        return "general"
-
 def get_connection():
     return psycopg2.connect(**DB_CONFIG)
 
-#  PERSON (FIXED) 
-def get_person_sql(query):
-    q = clean(query)
-    name_query = q.replace("who is", "").replace("tell me about", "").strip()
+# dept_codes matching faculty_profiles.dept_code
+_DEPT_CODES = {
+    "CSE", "ECE", "EEE", "MEC", "CIV", "IT", "AMC",
+    "AUT", "BIO", "BME", "ICE", "MCA", "MAT", "FAT",
+    "AFD", "CHE", "PHY", "ENG", "PRO", "MTL", "TXT", "RAE", "HUM", "AS"
+}
 
+def detect_department_id(query):
+    result = _llm_classify(
+        f"Extract the department code from the query. Return ONLY one code:\n"
+        f"CSE=Computer Science, ECE=Electronics & Communication, EEE=Electrical & Electronics,\n"
+        f"MEC=Mechanical, CIV=Civil, IT=Information Technology, AMC=Applied Mathematics & Computational Sciences,\n"
+        f"AUT=Automobile, BIO=Biotechnology, BME=Biomedical, ICE=Instrumentation,\n"
+        f"MCA=Computer Applications, MAT=Mathematics, PHY=Physics, CHE=Chemistry\n"
+        f"Return null if no department is mentioned.\n\n"
+        f"Examples:\n"
+        f"'Who is the CSE HOD?' → CSE\n"
+        f"'List ECE faculty' → ECE\n"
+        f"'Mechanical department staff' → MEC\n"
+        f"'Who is Helda Princy?' → null\n\n"
+        f"Query: {query}\nAnswer:"
+    )
+    for word in result.upper().split():
+        if word in _DEPT_CODES:
+            return word
+    return None
+
+def detect_query_type(query):
+    valid = {"hod", "list", "person", "general"}
+    result = _llm_classify(
+        f"Classify the query into ONE word: hod, list, person, or general\n\n"
+        f"hod    = asking about the head of a department\n"
+        f"list   = asking to list all faculty in a department\n"
+        f"person = asking about a specific named person\n"
+        f"general = any other faculty question\n\n"
+        f"Examples:\n"
+        f"'Who is the ECE HOD?' → hod\n"
+        f"'List all CSE faculty' → list\n"
+        f"'Who is Helda Princy?' → person\n"
+        f"'Tell me about the professors' → general\n\n"
+        f"Query: {query}\nAnswer:"
+    )
+    for word in result.split():
+        if word in valid:
+            return word
+    return "general"
+
+# FACULTY_PROFILES QUERIES
+
+def get_person_profiles(name: str):
     conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT 
-            cmetadata->>'name' AS name,
-            cmetadata->>'department' AS department,
-            cmetadata->>'role' AS role,
-            document
-        FROM langchain_pg_embedding
-        WHERE LOWER(cmetadata->>'name') ILIKE %s
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    sql = cur.mogrify("""
+        SELECT name, department, dept_code, academic_title,
+               contact_email, is_hod, in_brief,
+               educational_qualifications, subject_expertise, research_areas
+        FROM faculty_profiles
+        WHERE LOWER(name) ILIKE %s
         LIMIT 10
-    """, (f"%{name_query}%",))
-
+    """, (f"%{name}%",)).decode()
+    print(f"  [SQL person]\n{sql}")
+    cur.execute(sql)
     rows = cur.fetchall()
+    print(f"  [SQL person] rows returned: {len(rows)}")
     cur.close()
     conn.close()
-
     if not rows:
         return None
-
-    #  fuzzy ranking
     ranked = sorted(
         rows,
-        key=lambda x: fuzz.partial_ratio(name_query, (x[0] or "").lower()),
+        key=lambda r: fuzz.partial_ratio(name.lower(), (r["name"] or "").lower()),
         reverse=True
     )
+    best_score = fuzz.partial_ratio(name.lower(), (ranked[0]["name"] or "").lower())
+    print(f"  [SQL person] best match='{ranked[0]['name']}' score={best_score}")
+    return ranked[:3] if best_score >= 50 else None
 
-    return ranked[:3]
-
-# HOD 
-def get_hod_sql(dept_id):
+def get_hod_profiles(dept_code: str):
     conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT 
-            cmetadata->>'name',
-            cmetadata->>'department',
-            cmetadata->>'role',
-            document
-        FROM langchain_pg_embedding
-        WHERE cmetadata->>'department_id' = %s
-          AND LOWER(cmetadata->>'role') = 'hod'
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    sql = cur.mogrify("""
+        SELECT name, department, dept_code, academic_title,
+               contact_email, in_brief,
+               educational_qualifications, subject_expertise, research_areas
+        FROM faculty_profiles
+        WHERE dept_code = %s AND is_hod = true
         LIMIT 3
-    """, (dept_id,))
-
+    """, (dept_code,)).decode()
+    print(f"  [SQL hod]\n{sql}")
+    cur.execute(sql)
     rows = cur.fetchall()
+    print(f"  [SQL hod] rows returned: {len(rows)}")
     cur.close()
     conn.close()
-
     return rows
 
-#  LIST 
-def get_faculty_list_sql(dept_id):
+def get_list_profiles(dept_code: str):
     conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT DISTINCT cmetadata->>'name'
-        FROM langchain_pg_embedding
-        WHERE cmetadata->>'department_id' = %s
-    """, (dept_id,))
-
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    sql = cur.mogrify("""
+        SELECT name, academic_title
+        FROM faculty_profiles
+        WHERE dept_code = %s
+        ORDER BY name
+    """, (dept_code,)).decode()
+    print(f"  [SQL list]\n{sql}")
+    cur.execute(sql)
     rows = cur.fetchall()
+    print(f"  [SQL list] rows returned: {len(rows)}")
     cur.close()
     conn.close()
+    return rows
 
-    return [r[0] for r in rows if r[0]]
+#  VECTOR — queries public.documents with nomic-embed-text (768-dim)
+def get_general_vector(query, source_type=None):
+    print(f"  [Vector general] query='{query[:60]}'")
+    vec = _embed(query)
+    vec_str = "[" + ",".join(str(v) for v in vec) + "]"
 
-#  VECTOR 
-def get_general_vector(query):
-    return vectordb.similarity_search(query, k=5)
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-# FORMAT 
-def format_sql_rows(rows):
-    context = []
-    for name, dept, role, content in rows:
-        context.append(f"{name} ({dept}) [{role}]\n{content}")
-    return "\n\n---\n\n".join(context)
+    if source_type:
+        sql = cur.mogrify("""
+            SELECT title, content, metadata,
+                   ROUND((1 - (embedding <=> %s::vector))::numeric, 3) AS similarity
+            FROM public.documents
+            WHERE embedding IS NOT NULL AND source_type = %s
+            ORDER BY embedding <=> %s::vector
+            LIMIT 5
+        """, (vec_str, source_type, vec_str)).decode()
+    else:
+        sql = cur.mogrify("""
+            SELECT title, content, metadata,
+                   ROUND((1 - (embedding <=> %s::vector))::numeric, 3) AS similarity
+            FROM public.documents
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> %s::vector
+            LIMIT 5
+        """, (vec_str, vec_str)).decode()
 
-def format_vector_docs(docs):
-    context = []
-    for doc in docs:
-        meta = doc.metadata
-        context.append(
-            f"{meta.get('name')} ({meta.get('department')})\n{doc.page_content}"
-        )
-    return "\n\n---\n\n".join(context)
+    print(f"  [SQL vector]\n{sql[:300]}...")
+    cur.execute(sql)
+    rows = cur.fetchall()
+    if rows:
+        print(f"  [Vector general] {len(rows)} docs, top similarity={rows[0]['similarity']}")
+    cur.close()
+    conn.close()
+    return rows
 
-#  MAIN 
+# FORMAT
+import json as _json
+
+def format_profile(row):
+    parts = [
+        f"Name: {row['name']}",
+        f"Department: {row['department']}",
+        f"Title: {row['academic_title']}",
+    ]
+    if row.get("in_brief"):
+        parts.append(f"About: {row['in_brief']}")
+    for field, label in [
+        ("educational_qualifications", "Education"),
+        ("subject_expertise", "Expertise"),
+        ("research_areas", "Research Areas"),
+    ]:
+        val = row.get(field)
+        if isinstance(val, str):
+            try:
+                val = _json.loads(val)
+            except Exception:
+                val = None
+        if val:
+            parts.append(f"{label}: {', '.join(val)}")
+    if row.get("contact_email"):
+        parts.append(f"Email: {row['contact_email']}")
+    return "\n".join(parts)
+
+def format_vector_docs(rows):
+    parts = []
+    for row in rows:
+        meta = row.get("metadata") or {}
+        name = meta.get("name", "")
+        dept = meta.get("department", "")
+        header = f"{name} ({dept})" if name else row.get("title", "")
+        parts.append(f"{header}\n{row['content']}")
+    return "\n\n---\n\n".join(parts)
+
+#  MAIN
 def faculty_answer(question):
     try:
         qtype = detect_query_type(question)
-        dept_id = detect_department_id(question)
+        dept_code = detect_department_id(question)
 
         #  PERSON
         if qtype == "person":
-            rows = get_person_sql(question)
-
-            if rows:
-                context = format_sql_rows(rows)
-            else:
-                docs = get_general_vector(question)
-                if not docs:
-                    return "I'm sorry, I don't have that information."
-                context = format_vector_docs(docs)
+            name_query = _llm_classify(
+                f"Extract only the person's name from this query. Return just the name.\nQuery: {question}"
+            )
+            rows = get_person_profiles(name_query)
+            if not rows:
+                return f"I don't have any information about '{name_query}' in our faculty records."
+            context = "\n\n---\n\n".join(format_profile(r) for r in rows)
 
         #  HOD
         elif qtype == "hod":
-            if not dept_id:
+            if not dept_code:
                 return "Please specify the department."
-
-            rows = get_hod_sql(dept_id)
-
+            rows = get_hod_profiles(dept_code)
             if not rows:
-                return "I'm sorry, I don't have that information."
-
-            context = format_sql_rows(rows)
+                return "I'm sorry, I don't have HOD information for that department."
+            context = "\n\n---\n\n".join(format_profile(r) for r in rows)
 
         #  LIST
         elif qtype == "list":
-            if not dept_id:
+            if not dept_code:
                 return "Please specify the department."
-
-            faculty = get_faculty_list_sql(dept_id)
-
-            if not faculty:
-                return "I'm sorry, I don't have that information."
-
-            return "Faculty Members:\n\n" + "\n".join(sorted(faculty))
+            rows = get_list_profiles(dept_code)
+            if not rows:
+                return "I'm sorry, I don't have faculty information for that department."
+            lines = [f"{r['name']} ({r['academic_title']})" for r in rows]
+            return f"Faculty Members ({rows[0]['department'] if rows else dept_code}):\n\n" + "\n".join(lines)
 
         #  GENERAL
         else:
             docs = get_general_vector(question)
-
             if not docs:
                 return "I'm sorry, I don't have that information."
-
             context = format_vector_docs(docs)
 
         #  LLM
-        response = rag_chain.invoke({
-            "context": context,
-            "question": question
-        })
+        prompt = f"""You are a PSG College assistant. Answer ONLY from the context below. Do not hallucinate.
 
+Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+        print(f"  [LLM rag_faculty] invoking for: '{question[:60]}'")
+        response = _get_llm().invoke(prompt)
         return response.content
 
     except Exception:
-        return traceback.format_exc()
-
-#  FASTAPI 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class ChatRequest(BaseModel):
-    question: str
-
+        print(f"  [faculty_answer] error:\n{traceback.format_exc()}")
+        return "Sorry, I ran into a problem while looking that up. Please try again."

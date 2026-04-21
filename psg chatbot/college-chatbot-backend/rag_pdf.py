@@ -1,4 +1,6 @@
 import re
+import tomllib
+from pathlib import Path
 from typing import Optional
 from langchain_community.vectorstores import PGVector
 from langchain_ollama import OllamaEmbeddings, ChatOllama
@@ -6,18 +8,32 @@ from langchain_ollama import OllamaEmbeddings, ChatOllama
 
 # CONFIG
 
-CONNECTION_STRING = "postgresql+psycopg2://dbadmin:Ur12ec125@49.204.233.77:5432/mfrp_kalai"
-COLLECTION_NAME = "college_rag_full"
-OLLAMA_URL = "http://49.204.233.77:11434"
+with open(Path(__file__).parent / "config.toml", "rb") as f:
+    _cfg = tomllib.load(f)
 
-embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url=OLLAMA_URL)
-llm = ChatOllama(model="mistral", base_url=OLLAMA_URL, temperature=0)
-
-db = PGVector(
-    connection_string=CONNECTION_STRING,
-    collection_name=COLLECTION_NAME,
-    embedding_function=embeddings,
+_db = _cfg["database"]
+CONNECTION_STRING = (
+    f"postgresql+psycopg2://{_db['user']}:{_db['password']}"
+    f"@{_db['host']}:{_db['port']}/{_db['name']}"
 )
+COLLECTION_NAME = _cfg["vectorstore"]["pdf_collection"]
+OLLAMA_URL = _cfg["ollama"]["url"]
+
+_embeddings = None
+_llm = None
+_db = None
+
+def _get_db():
+    global _embeddings, _llm, _db
+    if _db is None:
+        _embeddings = OllamaEmbeddings(model=_cfg["ollama"]["embed_model"], base_url=OLLAMA_URL)
+        _llm = ChatOllama(model=_cfg["ollama"]["chat_model"], base_url=OLLAMA_URL, temperature=0)
+        _db = PGVector(
+            connection_string=CONNECTION_STRING,
+            collection_name=COLLECTION_NAME,
+            embedding_function=_embeddings,
+        )
+    return _db, _llm
 
 
 # NORMALIZE
@@ -81,16 +97,16 @@ def extract_from_block(block: str, event: str):
 # MAIN FUNCTION
 
 def search_pdf(question: str):
-
+    db, llm = _get_db()
     q = norm(question)
 
     batch = detect_batch(q)
     semester = detect_semester(q)
     event = detect_event(q)
 
-    
-    #  1. STRICT CALENDAR 
-    
+
+    #  1. STRICT CALENDAR
+
     if batch and event:
 
         # BOTH SEMESTERS
@@ -141,7 +157,7 @@ def search_pdf(question: str):
                         f"Event: {event}\n"
                         f"Start Date: {date}"
                     )
-    
+
     #  2. HOLIDAY (SEMANTIC)
 
     if any(x in q for x in ["pongal", "holiday", "deepavali", "christmas", "ramzan"]):
@@ -154,9 +170,9 @@ def search_pdf(question: str):
         if docs:
             return "\n\n".join([d.page_content for d in docs[:3]])
 
-    
+
     #  3. LLM FALLBACK (CHATGPT MODE)
-   
+
     docs = db.similarity_search(question, k=10)
 
     context = "\n\n".join([d.page_content for d in docs])
@@ -176,11 +192,12 @@ Rules:
 Context:
 {context}
 
-Question:       
+Question:
 {question}
 
 Answer:
 """
 
+    print(f"  [LLM rag_pdf] invoking LLM fallback for: '{question[:60]}'")
     response = llm.invoke(prompt)
     return response.content.strip()

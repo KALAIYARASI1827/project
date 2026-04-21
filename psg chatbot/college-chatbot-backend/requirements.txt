@@ -1,0 +1,34 @@
+# Web framework
+flask
+flask-cors
+
+# FastAPI (used in rag_faculty.py)
+fastapi
+uvicorn
+
+# Ollama client
+ollama
+
+# LangChain stack
+langchain-core
+langchain-text-splitters
+langchain-ollama
+langchain-community
+
+# Vector store / database
+psycopg2-binary
+pgvector
+
+# PDF parsing
+pymupdf
+
+# Fuzzy matching
+rapidfuzz
+
+# Web scraping
+requests
+beautifulsoup4
+urllib3
+
+# Data validation
+pydantic

@@ -1,16 +1,24 @@
-import os
+import tomllib
 import fitz
+from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import PGVector
 
 # CONFIG
-CONNECTION_STRING = "postgresql+psycopg2://dbadmin:Ur12ec125@49.204.233.77:5432/mfrp_kalai"
-COLLECTION_NAME = "college_rag_final"
-OLLAMA_URL = "http://49.204.233.77:11434"
+with open(Path(__file__).parent / "config.toml", "rb") as f:
+    _cfg = tomllib.load(f)
 
-PDF_PATH = "D:\\psg chatbot\\college-chatbot-backend\\pdfs\\finalcalendar.pdf"
+_db = _cfg["database"]
+CONNECTION_STRING = (
+    f"postgresql+psycopg2://{_db['user']}:{_db['password']}"
+    f"@{_db['host']}:{_db['port']}/{_db['name']}"
+)
+COLLECTION_NAME = _cfg["vectorstore"]["embed_collection"]
+OLLAMA_URL = _cfg["ollama"]["url"]
+
+PDF_PATH = Path(__file__).parent / _cfg["embed"]["pdf_path"]
 
 
 def load_pdf(path):

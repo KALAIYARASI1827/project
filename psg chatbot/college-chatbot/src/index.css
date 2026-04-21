@@ -1,14 +1,9 @@
-@import "@fontsource/inter/400.css";
-@import "@fontsource/inter/500.css";
-@import "@fontsource/inter/600.css";
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-
-/* stylelint-disable at-rule-no-unknown */
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-/* stylelint-enable at-rule-no-unknown */
-
-body {
-  font-family: "Inter", sans-serif;
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
 }
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: rgba(99,130,246,.3); border-radius: 99px; }
