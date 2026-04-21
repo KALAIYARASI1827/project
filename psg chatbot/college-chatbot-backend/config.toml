@@ -1,0 +1,47 @@
+[ollama]
+url        = "http://49.204.233.77:11434"
+chat_model = "mistral"
+embed_model = "nomic-embed-text"
+
+[database]
+host     = "49.204.233.77"
+port     = 5432
+name     = "mfrp_kalai"
+user     = "dbadmin"
+password = "Ur12ec125"
+
+# [ollama]
+# url                 = "http://192.168.0.7:11434"
+# chat_model          = "mistral"
+# embed_model         = "nomic-embed-text"
+# faculty_embed_model = "bge-large"
+
+# [database]
+# host     = "192.168.0.7"
+# port     = 5432
+# name     = "mfrp_kalai"
+# user     = "dbadmin"
+# password = "Ur12ec125"
+
+[vectorstore]
+pdf_collection     = "college_rag_full"
+embed_collection   = "college_rag_final"
+faculty_collection = "faculty_bge_v1"
+
+[embed]
+pdf_path = "pdfs/finalcalendar.pdf"
+
+[server]
+host  = "0.0.0.0"
+port  = 8000
+debug = true
+
+[auth]
+username = "admin"
+password = "psg@2025"
+
+[scraper]
+url        = "https://psgtech.edu/course%20conducted.php"
+user_agent = "Mozilla/5.0"
+timeout    = 100
+max_events = 5
